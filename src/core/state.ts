@@ -1,3 +1,27 @@
+/**
+ * Shihab X FCA — State Management
+ * Forked from @dongdev/fca-unofficial
+ *
+ * ─────────────────────────────────────────────
+ * 🧬 Original Author : DongDev (Donix)
+ * 🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+ * 📜 License         : Apache-2.0
+ * ─────────────────────────────────────────────
+ *
+ * Central state management for FCA:
+ *   • FcaOptions      — runtime options interface
+ *   • FcaContext      — full session context type
+ *   • createDefaultContext() — blank context factory
+ *   • createStateStore()     — reactive store helper
+ *   • createFcaState()       — full FCA context factory
+ *   • createApiFacade()      — base API facade factory
+ *   • attachThreadUpdater()  — DB message counter hook
+ */
+
+/* ═══════════════════════════════════════════════════════════
+   🎯 TYPES
+   ═══════════════════════════════════════════════════════════ */
+
 export interface FcaOptions {
   logLevel?: "silly" | "info" | "warn" | "error" | "silent";
   listenEvents?: boolean;
@@ -40,6 +64,14 @@ export interface FcaContext {
   [key: string]: Loose;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🏗️ DEFAULT CONTEXT
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Create a blank FCA context with safe defaults.
+ * Used internally by `createFcaState` and by the auth layer.
+ */
 export const createDefaultContext = (): FcaContext => ({
   fbid: "",
   clientId: ((Math.random() * 2147483648) | 0).toString(16),
@@ -51,10 +83,21 @@ export const createDefaultContext = (): FcaContext => ({
     selfListen: false,
     updatePresence: false,
     forceLogin: false,
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/600.3.18 (KHTML, like Gecko) Version/8.0.3 Safari/600.3.18"
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/600.3.18 (KHTML, like Gecko) Version/8.0.3 Safari/600.3.18"
   }
 });
 
+/* ═══════════════════════════════════════════════════════════
+   🗄️ STATE STORE HELPER
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Wrap a plain object with non-enumerable state helpers:
+ *   __set(key, value)     → set a single field, returns value
+ *   __merge(partial)      → shallow merge, returns state
+ *   __snapshot()          → frozen shallow copy
+ */
 export function createStateStore<T extends Record<string, Loose>>(initialState: T): T & {
   __set: (key: string, value: Loose) => Loose;
   __merge: (partial: Record<string, Loose>) => T;
@@ -100,8 +143,17 @@ export function createStateStore<T extends Record<string, Loose>>(initialState: 
   return state;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🎯 FCA STATE FACTORY
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Build a fully initialized FCA context from login-time inputs.
+ * Called after successful authentication.
+ */
 export function createFcaState(input: Record<string, Loose>): FcaContext {
   const base = createDefaultContext();
+
   const state = createStateStore({
     ...base,
     userID: input.userID as string,
@@ -127,12 +179,23 @@ export function createFcaState(input: Record<string, Loose>): FcaContext {
   }) as Loose as FcaContext;
 
   state.options = state.globalOptions || state.options;
+
   if (typeof input.bypassAutomation === "function") {
     state.bypassAutomation = (input.bypassAutomation as Function).bind(state);
   }
+
   return state;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🌐 BASE API FACADE
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Create the base API facade — a minimal set of methods that are
+ * always available on `ctx.api` before the full legacy surface is
+ * attached by `attachLegacyApiSurface()`.
+ */
 export function createApiFacade(params: {
   globalOptions: FcaOptions;
   jar: Loose;
@@ -155,13 +218,20 @@ export function createApiFacade(params: {
   } = params;
 
   return {
+    /* ─── Options ─── */
     setOptions: setOptions.bind(null, globalOptions),
+
+    /* ─── Cookies ─── */
     getCookies: function () {
       return cookieHeaderFromJar(jar);
     },
+
+    /* ─── AppState ─── */
     getAppState: function () {
       return getAppState(jar);
     },
+
+    /* ─── DB-backed AppState / Cookie recovery ─── */
     getLatestAppStateFromDB: async function (uid = userID) {
       const data = await getLatestBackup(uid, "appstate");
       return data ? JSON.parse(data) : null;
@@ -169,6 +239,8 @@ export function createApiFacade(params: {
     getLatestCookieFromDB: async function (uid = userID) {
       return await getLatestBackup(uid, "cookie");
     },
+
+    /* ─── Event emitter passthrough ─── */
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
     off: emitter.removeListener.bind(emitter),
@@ -176,6 +248,17 @@ export function createApiFacade(params: {
   };
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🧵 THREAD UPDATER — DB message counter
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Attach a lightweight per-message updater to the context that
+ * increments the `messageCount` field on the `Thread` model.
+ *
+ * Returns `true` if successfully attached, `false` when the
+ * `Thread` model is unavailable.
+ */
 export function attachThreadUpdater(
   ctx: FcaContext,
   models: Loose,
@@ -188,8 +271,11 @@ export function attachThreadUpdater(
     ctx._updateThreadFromMessage = async (msg: Loose) => {
       try {
         if (!msg || !msg.threadID) return;
+
         const id = String(msg.threadID);
         let affected = 0;
+
+        /* Try to increment existing row */
         try {
           const res = await Thread.increment("messageCount", {
             by: 1,
@@ -198,7 +284,11 @@ export function attachThreadUpdater(
           if (Array.isArray(res) && typeof res[0] === "number") {
             affected = res[0];
           }
-        } catch { }
+        } catch {
+          /* ignore — try create below */
+        }
+
+        /* Create new row if none existed */
         if (!affected) {
           try {
             await Thread.create({
@@ -206,17 +296,27 @@ export function attachThreadUpdater(
               messageCount: 1,
               data: { threadID: id }
             });
-          } catch { }
+          } catch {
+            /* ignore duplicate-key errors */
+          }
         }
       } catch (e: Loose) {
         const msgText = e && e.message ? e.message : String(e);
-        logger(`updateThreadFromMessage error: ${msgText}`, "warn");
+        logger(`[Shihab X FCA] updateThreadFromMessage error: ${msgText}`, "warn");
       }
     };
+
     return true;
   } catch {
     return false;
   }
 }
 
-
+/* ═══════════════════════════════════════════════════════════
+   📖 CREDITS
+   ─────────────────────────────────────────────
+   🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+   🧬 Original Author : DongDev (Donix)
+   📦 Original Project: @dongdev/fca-unofficial
+   📜 License         : Apache-2.0
+   ═══════════════════════════════════════════════════════════ */
