@@ -1,3 +1,22 @@
+/**
+ * Shihab X FCA — MessengerBot (Event-Driven Client)
+ * Forked from @dongdev/fca-unofficial
+ *
+ * ─────────────────────────────────────────────
+ * 🧬 Original Author : DongDev (Donix)
+ * 🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+ * 📜 License         : Apache-2.0
+ * ─────────────────────────────────────────────
+ *
+ * Discord.js / Telegraf-style bot client built on top of FCA.
+ *
+ * Features:
+ *   • Named events — messageCreate, messageReactionAdd, typingStart/Stop, …
+ *   • Composer pipeline — `use`, `command`, `hears`, `catch`
+ *   • Signal handling — graceful shutdown on SIGINT/SIGTERM
+ *   • Namespaced client facade — `bot.client`
+ */
+
 import { EventEmitter } from "node:events";
 import { login, type LoginCredentials } from "../core/auth";
 import type { FcaContext, FcaOptions } from "../core/state";
@@ -6,18 +25,26 @@ import { createFcaClient } from "./create-client";
 import type { FcaClientFacade } from "../types/client";
 import { MessengerContext, type MessengerBotLike } from "./messenger-context";
 
+/* ═══════════════════════════════════════════════════════════
+   🎯 PUBLIC TYPES
+   ═══════════════════════════════════════════════════════════ */
+
 export interface MessengerBotOptions extends FcaOptions {
-  /** Gọi `listenMqtt` ngay sau login. Mặc định `true`. */
+  /** Call `listenMqtt` immediately after login. Default: `true`. */
   autoListen?: boolean;
-  /** Bật chuỗi `use` / `command` / `hears`. Mặc định `true`. */
+
+  /** Enable the `use` / `command` / `hears` middleware chain. Default: `true`. */
   enableComposer?: boolean;
-  /** Tiền tố lệnh cho `command()`. Mặc định `/`. */
+
+  /** Command prefix for `command()`. Default: `/`. */
   commandPrefix?: string;
-  /** `process.once('SIGINT'|'SIGTERM')` → `stop()`. Mặc định `false`. */
+
+  /** On SIGINT/SIGTERM → call `stop()`. Default: `false`. */
   stopOnSignals?: boolean;
+
   /**
-   * Giới hạn listener trên bot (EventEmitter). Mặc định 64.
-   * Dùng 0 nếu cần không giới hạn (tốn RAM hơn khi gắn rất nhiều handler).
+   * Max event listeners on the bot (EventEmitter). Default: `64`.
+   * Use `0` for unlimited (more RAM when attaching many handlers).
    */
   maxEventListeners?: number;
 }
@@ -28,6 +55,10 @@ export type MessengerMiddleware = (
   ctx: MessengerContext,
   next: MessengerNext
 ) => void | Promise<void>;
+
+/* ═══════════════════════════════════════════════════════════
+   🔧 INTERNAL TYPES
+   ═══════════════════════════════════════════════════════════ */
 
 interface MessengerBotRuntimeOptions {
   enableComposer: boolean;
@@ -43,26 +74,37 @@ interface MqttEmitterLike {
   stopListeningAsync?: () => Promise<void>;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🛠️ HELPERS
+   ═══════════════════════════════════════════════════════════ */
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Chỉ emit khi có subscriber — giảm overhead và giữ `_events` gọn hơn khi ít dùng alias. */
+/**
+ * Emit only when there is at least one subscriber.
+ * Reduces overhead and keeps `_events` lean when aliases are rarely used.
+ */
 function emitIf(bot: MessengerBot, channel: string, payload: MqttEvent): void {
   if (bot.listenerCount(channel) > 0) {
     bot.emit(channel, payload);
   }
 }
 
+/**
+ * Fan out a raw MQTT event to all named channels the bot exposes.
+ * Fires at most one "primary" channel per event type, plus the
+ * universal `update` / `raw` streams.
+ */
 function emitGatewayEvents(bot: MessengerBot, event: MqttEvent): void {
   emitIf(bot, "update", event);
   emitIf(bot, "raw", event);
 
   const t = event.type;
-  if (!t) {
-    return;
-  }
+  if (!t) return;
 
+  /* ─── Message-related ─── */
   if (t === "message" || t === "message_reply") {
     emitIf(bot, "message", event);
     emitIf(bot, "messageCreate", event);
@@ -74,35 +116,51 @@ function emitGatewayEvents(bot: MessengerBot, event: MqttEvent): void {
     emitIf(bot, t, event);
   }
 
+  /* ─── Special-case channels ─── */
   switch (t) {
     case "message_reaction":
       emitIf(bot, "messageReactionAdd", event);
       break;
+
     case "message_unsend":
       emitIf(bot, "messageDelete", event);
       break;
+
     case "typ": {
       const te = event as TypingEvent;
       emitIf(bot, te.isTyping ? "typingStart" : "typingStop", event);
       break;
     }
+
     case "event":
       emitIf(bot, "threadUpdate", event);
       break;
+
     case "ready":
       emitIf(bot, "ready", event);
       emitIf(bot, "shardReady", event);
       break;
+
     default:
       break;
   }
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🤖 MESSENGER BOT CLASS
+   ═══════════════════════════════════════════════════════════ */
 
 /**
- * Client kiểu Discord.js / Telegraf:
- * - Sự kiện: `messageCreate`, `raw`, `messageReactionAdd`, `messageDelete`, `typingStart` / `typingStop`, `threadUpdate`, `ready`, …
- * - Composer: `use`, `command`, `hears`, `catch` (chuỗi middleware + khớp lệnh / text).
+ * Discord.js / Telegraf-style client for Facebook Messenger.
+ *
+ * Events:
+ *   `messageCreate`, `message_reply`, `messageReactionAdd`,
+ *   `messageDelete`, `typingStart`, `typingStop`, `threadUpdate`,
+ *   `ready`, `raw`, `update`, `error`
+ *
+ * Composer:
+ *   `use`, `command`, `hears`, `catch` — middleware chain plus
+ *   command / text matching.
  */
 export class MessengerBot extends EventEmitter implements MessengerBotLike {
   readonly ctx: FcaContext;
@@ -120,6 +178,7 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
   private _signalsBound = false;
   private _onStopSignal?: () => void;
 
+  /* ─── Private constructor — use `MessengerBot.connect()` ─── */
   private constructor(ctx: FcaContext, runtime: MessengerBotRuntimeOptions) {
     super();
     const cap = runtime.maxEventListeners;
@@ -131,6 +190,10 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
     this._stopOnSignals = runtime.stopOnSignals;
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🎛️ COMMAND PREFIX
+     ═══════════════════════════════════════════════════════ */
+
   get commandPrefix(): string {
     return this._commandPrefix;
   }
@@ -139,6 +202,10 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
     this._commandPrefix = value || "/";
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🌐 CLIENT FACADE (lazy)
+     ═══════════════════════════════════════════════════════ */
+
   get client(): FcaClientFacade {
     if (!this._facade) {
       this._facade = createFcaClient(this.api as Loose);
@@ -146,8 +213,13 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
     return this._facade;
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🎼 COMPOSER MIDDLEWARE
+     ═══════════════════════════════════════════════════════ */
+
   /**
-   * Middleware toàn cục (Telegraf-style). Gọi `next()` để chuyển sang lớp sau.
+   * Register global middleware (Telegraf-style).
+   * Call `next()` to pass control to the next layer.
    */
   use(middleware: MessengerMiddleware): this {
     this._middlewares.push(middleware);
@@ -155,32 +227,41 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
   }
 
   /**
-   * Khớp `/{name}` hoặc `{prefix}{name}` ở đầu nội dung (không phân biệt hoa thường tên lệnh).
+   * Register a command handler.
+   * Matches `/{name}` or `{prefix}{name}` at the start of the message
+   * (case-insensitive on the command name).
    */
   command(
     name: string,
     handler: (ctx: MessengerContext) => void | Promise<void>
   ): this {
     const n = name.toLowerCase();
+
     this.use(async (ctx, next) => {
       const text = ctx.text;
       if (!text) {
         await next();
         return;
       }
+
       const prefix = escapeRegex(this._commandPrefix);
       const re = new RegExp(`^${prefix}${escapeRegex(n)}(?:\\s|$)`, "i");
+
       if (re.test(text)) {
         await handler(ctx);
         return;
       }
+
       await next();
     });
+
     return this;
   }
 
   /**
-   * Chuỗi khớp toàn bộ text (RegExp) hoặc chứa substring (string).
+   * Register a text-match handler.
+   * `string` → case-insensitive substring match.
+   * `RegExp` → full pattern test.
    */
   hears(
     trigger: string | RegExp,
@@ -197,32 +278,42 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
         await next();
         return;
       }
+
       if (match(text)) {
         await handler(ctx);
         return;
       }
+
       await next();
     });
+
     return this;
   }
 
   /**
-   * Bắt lỗi ném ra trong composer (middleware / command / hears).
+   * Register a composer error handler.
+   * Catches errors thrown inside `use` / `command` / `hears` handlers.
    */
   catch(handler: (err: unknown, ctx?: MessengerContext) => void): this {
     this._catchHandler = handler;
     return this;
   }
 
-  /** Bắt đầu MQTT (idempotent). */
+  /* ═══════════════════════════════════════════════════════
+     📡 MQTT LISTENING
+     ═══════════════════════════════════════════════════════ */
+
+  /**
+   * Start MQTT listening (idempotent — safe to call multiple times).
+   */
   startListening(): this {
-    if (this._listening) {
-      return this;
-    }
+    if (this._listening) return this;
+
     const listen = this.api.listenMqtt as undefined | (() => MqttEmitterLike);
     if (typeof listen !== "function") {
-      throw new Error("listenMqtt is not available on API");
+      throw new Error("[Shihab X FCA] listenMqtt is not available on API");
     }
+
     const mqtt = listen.call(this.api);
     this._mqtt = mqtt;
     this._listening = true;
@@ -231,6 +322,7 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
       emitGatewayEvents(this, event);
       this.enqueueComposerIfNeeded(event);
     });
+
     mqtt.on("error", (err: ListenMqttError) => {
       this.emit("error", err);
     });
@@ -239,68 +331,85 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
   }
 
   /**
-   * `startListening` + tùy chọn gắn SIGINT/SIGTERM (Telegraf `launch` gần tương đương).
+   * Start listening + optionally bind SIGINT/SIGTERM shutdown.
+   * Roughly equivalent to Telegraf's `launch()`.
    */
   async launch(opts?: { stopOnSignals?: boolean }): Promise<this> {
     this.startListening();
+
     const bind = opts?.stopOnSignals ?? this._stopOnSignals;
     if (bind) {
       this.attachStopSignals();
     }
+
     return this;
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🛑 SIGNAL HANDLING
+     ═══════════════════════════════════════════════════════ */
+
   private attachStopSignals(): void {
-    if (this._signalsBound) {
-      return;
-    }
+    if (this._signalsBound) return;
     this._signalsBound = true;
+
     this._onStopSignal = () => {
       void this.stop()
         .then(() => process.exit(0))
         .catch(() => process.exit(1));
     };
+
     process.once("SIGINT", this._onStopSignal);
     process.once("SIGTERM", this._onStopSignal);
   }
 
-  /** Gỡ handler SIGINT/SIGTERM để process không giữ reference bot (tối ưu RAM khi stop sớm). */
+  /**
+   * Remove SIGINT/SIGTERM handlers so the process doesn't hold a
+   * bot reference (RAM optimization when stopping early).
+   */
   private detachStopSignals(): void {
-    if (!this._signalsBound || !this._onStopSignal) {
-      return;
-    }
+    if (!this._signalsBound || !this._onStopSignal) return;
+
     process.off("SIGINT", this._onStopSignal);
     process.off("SIGTERM", this._onStopSignal);
+
     this._signalsBound = false;
     this._onStopSignal = undefined;
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🛑 STOP
+     ═══════════════════════════════════════════════════════ */
+
   async stop(): Promise<void> {
     this.detachStopSignals();
 
-    if (!this._mqtt) {
-      return;
-    }
+    if (!this._mqtt) return;
+
     const mqtt = this._mqtt;
     const asyncStop = mqtt.stopListeningAsync;
+
     if (typeof asyncStop === "function") {
       await asyncStop();
     } else {
       mqtt.stopListening?.();
     }
+
     mqtt.removeAllListeners?.();
     this._mqtt = null;
     this._listening = false;
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🎼 COMPOSER DISPATCH
+     ═══════════════════════════════════════════════════════ */
+
   private enqueueComposerIfNeeded(event: MqttEvent): void {
-    if (!this._enableComposer || this._middlewares.length === 0) {
-      return;
-    }
-    if (event.type !== "message" && event.type !== "message_reply") {
-      return;
-    }
+    if (!this._enableComposer || this._middlewares.length === 0) return;
+    if (event.type !== "message" && event.type !== "message_reply") return;
+
     const ctx = new MessengerContext(this, event as MessageEvent);
+
     queueMicrotask(() => {
       void this.runComposer(ctx);
     });
@@ -308,9 +417,8 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
 
   private async runComposer(ctx: MessengerContext): Promise<void> {
     const dispatch = async (index: number): Promise<void> => {
-      if (index >= this._middlewares.length) {
-        return;
-      }
+      if (index >= this._middlewares.length) return;
+
       const mw = this._middlewares[index];
       await mw(ctx, () => dispatch(index + 1));
     };
@@ -326,6 +434,10 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
     }
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🚀 STATIC FACTORY
+     ═══════════════════════════════════════════════════════ */
+
   static async connect(
     credentials: LoginCredentials,
     options?: MessengerBotOptions
@@ -340,6 +452,7 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
     } = options ?? {};
 
     const ctx = await login(credentials, fcaOptions);
+
     const bot = new MessengerBot(ctx, {
       enableComposer,
       commandPrefix,
@@ -357,9 +470,26 @@ export class MessengerBot extends EventEmitter implements MessengerBotLike {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🏭 FACTORY FUNCTION
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Create and connect a `MessengerBot` instance.
+ * Shorthand for `MessengerBot.connect(credentials, options)`.
+ */
 export function createMessengerBot(
   credentials: LoginCredentials,
   options?: MessengerBotOptions
 ): Promise<MessengerBot> {
   return MessengerBot.connect(credentials, options);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   📖 CREDITS
+   ─────────────────────────────────────────────
+   🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+   🧬 Original Author : DongDev (Donix)
+   📦 Original Project: @dongdev/fca-unofficial
+   📜 License         : Apache-2.0
+   ═══════════════════════════════════════════════════════════ */
