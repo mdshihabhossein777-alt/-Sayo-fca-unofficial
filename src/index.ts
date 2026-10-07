@@ -1,3 +1,28 @@
+/**
+ * Shihab X FCA — Main Entry
+ * Forked from @dongdev/fca-unofficial
+ * Author: Shihab X (mdshihabhosein777-alt)
+ */
+
+/* ═══ Shihab X Banner (prints once on module load) ═══ */
+import { printBanner } from "./utils/banner";
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __SHIHAB_X_BANNER_SHOWN__: boolean | undefined;
+}
+
+if (!globalThis.__SHIHAB_X_BANNER_SHOWN__) {
+  globalThis.__SHIHAB_X_BANNER_SHOWN__ = true;
+  try {
+    const pkg = require("../package.json");
+    printBanner(pkg?.version || "1.0.0");
+  } catch (_) {
+    printBanner("1.0.0");
+  }
+}
+
+/* ═══ Public Exports ═══ */
 export {
   login,
   loginAsync,
