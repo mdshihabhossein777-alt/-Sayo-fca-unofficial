@@ -8,17 +8,19 @@
  * 📜 License         : Apache-2.0
  * ─────────────────────────────────────────────
  *
- * This module is a thin CommonJS-compatible wrapper around the legacy
- * login implementation. It exists to preserve the classic `require()`
- * signature (`module.exports = loginHelper`) used by GoatBot-style bots
- * and other legacy consumers.
+ * Thin CommonJS-compatible wrapper around the legacy login impl.
+ * Preserves the classic `require()` signature used by GoatBot-style bots.
  *
- * The modern TypeScript entry (`./auth.ts`) provides typed named exports
- * for new code.
+ * 🚀 SHIHAB X PREMIUM:
+ *   Automatically activates the Shihab X Premium core
+ *   (rate-limit, human delay, cache, retry, circuit breaker,
+ *   health check, cookie watcher, graceful shutdown) on successful
+ *   login. No changes to `login-helper.impl.ts` required.
  */
 
 import type { FcaOptions } from "./state";
 import legacyImpl from "./login-helper.impl";
+import { activatePremium } from "./premium";
 
 /* ═══════════════════════════════════════════════════════════
    🎯 TYPES
@@ -99,10 +101,123 @@ type LegacyLoginHelper = ((
 };
 
 /* ═══════════════════════════════════════════════════════════
-   📌 EXPORT
+   🔧 ORIGINAL IMPL
    ═══════════════════════════════════════════════════════════ */
 
-const legacy = legacyImpl as unknown as LegacyLoginHelper;
+const originalLegacy = legacyImpl as unknown as LegacyLoginHelper;
+
+/* ═══════════════════════════════════════════════════════════
+   💎 PREMIUM ACTIVATOR
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Try to locate the FCA context on the returned API object.
+ * Falls back to a minimal stub so premium features still work.
+ */
+function resolveContext(api: Loose): Loose {
+  if (!api) return {};
+
+  return (
+    (api as Loose).ctx ||
+    (api as Loose)._ctx ||
+    (api as Loose)._context || {
+      api,
+      jar: null,
+      _emitter: null
+    }
+  );
+}
+
+/**
+ * Activate all Shihab X Premium features on a freshly logged-in API.
+ * Never throws — premium is optional.
+ */
+function activateShihabXPremium(api: Loose): void {
+  try {
+    const ctx = resolveContext(api);
+
+    activatePremium(api, ctx, {
+      /* ═══ 🛡️ Safety ═══ */
+      rateLimitEnabled: true,
+      threadLimit: 10, /* per-thread only — per-user is OFF */
+      threadWindowMs: 60_000,
+
+      humanDelayEnabled: true,
+      humanDelayMinMs: 800,
+      humanDelayMaxMs: 3000,
+
+      duplicateBlockerEnabled: true,
+      duplicateWindowMs: 10_000,
+
+      cookieWatcherEnabled: true,
+      cookieWarnDays: 3,
+
+      /* ═══ ⚡ Speed ═══ */
+      cacheEnabled: true,
+      cacheTtlMs: 5 * 60_000,
+
+      /* ═══ 🔄 Reliability ═══ */
+      retryEnabled: true,
+      retryMaxAttempts: 3,
+      circuitBreakerEnabled: true,
+      circuitFailureThreshold: 5,
+      healthCheckEnabled: true,
+      healthCheckIntervalMs: 5 * 60_000,
+      gracefulShutdownEnabled: true,
+
+      /* ═══ 🐛 Debug ═══ */
+      debug: false
+    });
+  } catch {
+    /* silent — premium is optional */
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   🚀 WRAPPED LOGIN HELPER
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Wrap the original login helper so that, on successful login,
+ * Shihab X Premium is activated before the callback fires.
+ */
+function wrappedLoginHelper(
+  appState: Loose,
+  cookieInput: string | string[] | Record<string, string> | undefined,
+  email: string | undefined,
+  password: string | undefined,
+  globalOptions: FcaOptions,
+  callback: LoginHelperCallback
+): void {
+  originalLegacy.loginHelper(
+    appState,
+    cookieInput,
+    email,
+    password,
+    globalOptions,
+    function (err, api) {
+      if (!err && api) {
+        activateShihabXPremium(api as Loose);
+      }
+      callback(err, api);
+    }
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   📌 EXPORT — Preserve static methods
+   ═══════════════════════════════════════════════════════════ */
+
+const legacy = Object.assign(wrappedLoginHelper, {
+  tokensViaAPI: originalLegacy.tokensViaAPI,
+  loginViaAPI: originalLegacy.loginViaAPI,
+  tokens: originalLegacy.tokens,
+  normalizeCookieHeaderString: originalLegacy.normalizeCookieHeaderString,
+  setJarFromPairs: originalLegacy.setJarFromPairs
+}) as unknown as LegacyLoginHelper;
+
+/* Self-reference so `legacy.loginHelper(...)` also works */
+(legacy as Loose).loginHelper = legacy;
 
 export = legacy;
 
