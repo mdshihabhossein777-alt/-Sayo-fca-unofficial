@@ -1,3 +1,22 @@
+/**
+ * Shihab X FCA — Legacy API Surface Attacher
+ * Forked from @dongdev/fca-unofficial
+ *
+ * ─────────────────────────────────────────────
+ * 🧬 Original Author : DongDev (Donix)
+ * 🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+ * 📜 License         : Apache-2.0
+ * ─────────────────────────────────────────────
+ *
+ * Builds the complete flat "legacy" API surface (`api.sendMessage`,
+ * `api.getThreadInfo`, …) plus namespaced domains (`messages`, `threads`,
+ * `users`, `account`, `realtime`, `http`, `scheduler`) and attaches them
+ * to the FCA API object.
+ *
+ * Domains are created via factory functions under `../domains/*`.
+ * Duplicate keys on the API are skipped to preserve runtime overrides.
+ */
+
 import { createAccountDomain } from "../domains/account";
 import { createHttpDomain } from "../domains/http";
 import { createMessagesDomain } from "../domains/messages";
@@ -22,9 +41,23 @@ import createListenMqtt from "../transport/realtime/connect-mqtt";
 import getTaskResponseData from "../transport/realtime/task-response";
 import streamMod from "../transport/realtime/stream";
 import { topics } from "../transport/realtime/topics";
-import { isReadableStream } from "../utils/constants";
+import { isReadableStream, BRAND } from "../utils/constants";
 import { parseAndCheckLogin } from "../utils/client";
 import formatMod from "../utils/format";
+
+/* ═══════════════════════════════════════════════════════════
+   🎯 TYPES
+   ═══════════════════════════════════════════════════════════ */
+
+export interface LegacyApiAttachResult {
+  loaded: number;
+  skipped: number;
+  namespaces: FcaClientNamespaces;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   🔧 MODULE PULLS
+   ═══════════════════════════════════════════════════════════ */
 
 const { buildProxy, buildStream } = streamMod;
 
@@ -35,11 +68,9 @@ const {
   getCurrentTimestamp
 } = formatMod;
 
-export interface LegacyApiAttachResult {
-  loaded: number;
-  skipped: number;
-  namespaces: FcaClientNamespaces;
-}
+/* ═══════════════════════════════════════════════════════════
+   📝 LOG HELPERS
+   ═══════════════════════════════════════════════════════════ */
 
 function createUploadLogger() {
   return {
@@ -57,25 +88,43 @@ function logInfo(scope: string, message: string) {
   legacyLog.info(scope, message);
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🛠️ NAMESPACE HELPERS
+   ═══════════════════════════════════════════════════════════ */
+
+/** Remove `undefined` entries from a namespace object. */
 function compactNamespace(namespace: Record<string, Loose>): FcaClientNamespace {
   return Object.fromEntries(
     Object.entries(namespace).filter(([, value]) => typeof value !== "undefined")
   ) as FcaClientNamespace;
 }
 
+/**
+ * Bind a "live" API method that resolves the target function at call
+ * time — useful for methods that get replaced at runtime.
+ */
 function bindLiveMethod(api: Record<string, Loose>, key: string) {
   return (...args: Loose[]) => {
     const candidate = api[key];
+
     if (typeof candidate !== "function") {
-      throw new Error(`API method "${key}" is not available`);
+      throw new Error(`[${BRAND.name}] API method "${key}" is not available`);
     }
+
     return candidate.apply(api, args);
   };
 }
 
-function createLegacyListenMqttFactory(logger: (text: string, type?: string) => void) {
+/* ═══════════════════════════════════════════════════════════
+   📡 REALTIME LISTENER FACTORY
+   ═══════════════════════════════════════════════════════════ */
+
+function createLegacyListenMqttFactory(
+  logger: (text: string, type?: string) => void
+) {
   const parseDelta = createParseDelta({ parseAndCheckLogin });
   const emitAuth = createEmitAuth({ logger });
+
   const listenMqttCore = createListenMqtt({
     WebSocket,
     mqtt,
@@ -88,6 +137,7 @@ function createLegacyListenMqttFactory(logger: (text: string, type?: string) => 
     logger,
     emitAuth
   });
+
   const getSeqIDFactory = createGetSeqID({
     listenMqtt: listenMqttCore,
     logger,
@@ -105,6 +155,20 @@ function createLegacyListenMqttFactory(logger: (text: string, type?: string) => 
   });
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🚀 MAIN — Attach Legacy API Surface
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Attach the full legacy API surface + namespaced domains to the
+ * FCA API object.
+ *
+ * @param api         — The FCA API object (mutated in place)
+ * @param defaultFuncs — Low-level HTTP helpers
+ * @param ctx         — FCA context
+ * @param logger      — Optional logger (defaults to Shihab X logger)
+ * @returns `{ loaded, skipped, namespaces }`
+ */
 export function attachLegacyApiSurface(
   api: Record<string, Loose>,
   defaultFuncs: Loose,
@@ -117,6 +181,9 @@ export function attachLegacyApiSurface(
     logError
   });
 
+  /* ═══════════════════════════════════════════════════════
+     💬 MESSAGES DOMAIN
+     ═══════════════════════════════════════════════════════ */
   const messages = createMessagesDomain({
     send: {
       ctx,
@@ -125,183 +192,46 @@ export function attachLegacyApiSurface(
       isReadableStream,
       logError
     },
-    markRead: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    typing: {
-      ctx,
-      logError
-    },
-    markSeen: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    markDelivered: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    markReadAll: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    reaction: {
-      ctx,
-      generateOfflineThreadingID,
-      getCurrentTimestamp,
-      logError
-    },
-    uploadAttachment: {
-      ctx,
-      logger: createUploadLogger(),
-      logError
-    },
-    edit: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    delete: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    unsend: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    forwardAttachment: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    shareContact: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    threadColor: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    threadEmoji: {
-      defaultFuncs,
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    get: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    photoUrl: {
-      defaultFuncs,
-      ctx,
-      logError
-    }
+    markRead: { defaultFuncs, ctx, logError },
+    typing: { ctx, logError },
+    markSeen: { defaultFuncs, ctx, logError },
+    markDelivered: { defaultFuncs, ctx, logError },
+    markReadAll: { defaultFuncs, ctx, logError },
+    reaction: { ctx, generateOfflineThreadingID, getCurrentTimestamp, logError },
+    uploadAttachment: { ctx, logger: createUploadLogger(), logError },
+    edit: { ctx, generateOfflineThreadingID, logError },
+    delete: { ctx, generateOfflineThreadingID, logError },
+    unsend: { ctx, generateOfflineThreadingID, logError },
+    forwardAttachment: { ctx, generateOfflineThreadingID, logError },
+    shareContact: { ctx, generateOfflineThreadingID, logError },
+    threadColor: { ctx, generateOfflineThreadingID, logError },
+    threadEmoji: { defaultFuncs, ctx, generateOfflineThreadingID, logError },
+    get: { defaultFuncs, ctx, logError },
+    photoUrl: { defaultFuncs, ctx, logError }
   }) as Record<string, Loose>;
 
+  /* ═══════════════════════════════════════════════════════
+     🧵 THREADS DOMAIN
+     ═══════════════════════════════════════════════════════ */
   const threads = createThreadsDomain({
-    info: {
-      defaultFuncs,
-      api,
-      ctx,
-      logError
-    },
-    list: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    history: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    pictures: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    color: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    emoji: {
-      defaultFuncs,
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    mute: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    archive: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    addUsers: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    removeUser: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    adminStatus: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    groupImage: {
-      defaultFuncs,
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    nickname: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    createGroup: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    createPoll: {
-      ctx,
-      generateOfflineThreadingID,
-      logError
-    },
-    createThemeAI: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    messageRequest: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    deleteThread: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
+    info: { defaultFuncs, api, ctx, logError },
+    list: { defaultFuncs, ctx, logError },
+    history: { defaultFuncs, ctx, logError },
+    pictures: { defaultFuncs, ctx, logError },
+    color: { ctx, generateOfflineThreadingID, logError },
+    emoji: { defaultFuncs, ctx, generateOfflineThreadingID, logError },
+    mute: { defaultFuncs, ctx, logError },
+    archive: { defaultFuncs, ctx, logError },
+    addUsers: { ctx, generateOfflineThreadingID, logError },
+    removeUser: { ctx, generateOfflineThreadingID, logError },
+    adminStatus: { ctx, generateOfflineThreadingID, logError },
+    groupImage: { defaultFuncs, ctx, generateOfflineThreadingID, logError },
+    nickname: { ctx, generateOfflineThreadingID, logError },
+    createGroup: { defaultFuncs, ctx, logError },
+    createPoll: { ctx, generateOfflineThreadingID, logError },
+    createThemeAI: { defaultFuncs, ctx, logError },
+    messageRequest: { defaultFuncs, ctx, logError },
+    deleteThread: { defaultFuncs, ctx, logError },
     title: {
       defaultFuncs,
       ctx,
@@ -310,120 +240,66 @@ export function attachLegacyApiSurface(
       generateThreadingID,
       logError
     },
-    search: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    themePictures: {
-      defaultFuncs,
-      ctx,
-      logError
-    }
+    search: { defaultFuncs, ctx, logError },
+    themePictures: { defaultFuncs, ctx, logError }
   }) as Record<string, Loose>;
 
+  /* ═══════════════════════════════════════════════════════
+     👤 USERS DOMAIN
+     ═══════════════════════════════════════════════════════ */
   const users = createUsersDomain({
-    info: {
-      defaultFuncs,
-      api,
-      ctx,
-      logger,
-      logError
-    },
-    infoV2: {
-      defaultFuncs,
-      ctx,
-      logger
-    },
-    idLookup: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    friendsList: {
-      defaultFuncs,
-      ctx,
-      logError
-    }
+    info: { defaultFuncs, api, ctx, logger, logError },
+    infoV2: { defaultFuncs, ctx, logger },
+    idLookup: { defaultFuncs, ctx, logError },
+    friendsList: { defaultFuncs, ctx, logError }
   }) as Record<string, Loose>;
 
+  /* ═══════════════════════════════════════════════════════
+     ⚙️ ACCOUNT DOMAIN
+     ═══════════════════════════════════════════════════════ */
   const account = createAccountDomain({
-    addExternalModule: {
-      defaultFuncs,
-      api,
-      ctx
-    },
-    currentUserId: {
-      ctx
-    },
+    addExternalModule: { defaultFuncs, api, ctx },
+    currentUserId: { ctx },
     enableAutoSaveAppState: {
-      api: {
-        getAppState: () => api.getAppState()
-      },
+      api: { getAppState: () => api.getAppState() },
       ctx,
       logger
     },
-    logout: {
-      defaultFuncs,
-      ctx,
-      logInfo,
-      logError
-    },
-    refreshFbDtsg: {
-      ctx
-    },
+    logout: { defaultFuncs, ctx, logInfo, logError },
+    refreshFbDtsg: { ctx },
     changeAvatar: {
       defaultFuncs,
       ctx,
-      isReadableStream: isReadableStream as (value: Loose) => value is NodeJS.ReadableStream,
+      isReadableStream: isReadableStream as (
+        value: Loose
+      ) => value is NodeJS.ReadableStream,
       logError
     },
-    changeBio: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    handleFriendRequest: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    unfriend: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    setPostReaction: {
-      defaultFuncs,
-      ctx,
-      logError
-    },
-    changeBlockedStatus: {
-      defaultFuncs,
-      ctx,
-      logError
-    }
+    changeBio: { defaultFuncs, ctx, logError },
+    handleFriendRequest: { defaultFuncs, ctx, logError },
+    unfriend: { defaultFuncs, ctx, logError },
+    setPostReaction: { defaultFuncs, ctx, logError },
+    changeBlockedStatus: { defaultFuncs, ctx, logError }
   }) as Record<string, Loose>;
 
+  /* ═══════════════════════════════════════════════════════
+     🌐 HTTP DOMAIN
+     ═══════════════════════════════════════════════════════ */
   const http = createHttpDomain({
-    get: {
-      defaultFuncs,
-      ctx
-    },
-    post: {
-      defaultFuncs,
-      ctx
-    },
-    postFormData: {
-      defaultFuncs,
-      ctx,
-      logError
-    }
+    get: { defaultFuncs, ctx },
+    post: { defaultFuncs, ctx },
+    postFormData: { defaultFuncs, ctx, logError }
   }) as Record<string, Loose>;
 
+  /* ═══════════════════════════════════════════════════════
+     📡 REALTIME LISTENER
+     ═══════════════════════════════════════════════════════ */
   const attachRealtimeListener = createLegacyListenMqttFactory(logger);
   const listenMqtt = attachRealtimeListener(defaultFuncs, api, ctx);
 
+  /* ═══════════════════════════════════════════════════════
+     ⏰ SCHEDULER DOMAIN
+     ═══════════════════════════════════════════════════════ */
   if (!ctx._scheduler) {
     ctx._scheduler = createSchedulerDomain({
       sendMessage: (...args: Loose[]) => api.sendMessage(...args),
@@ -431,10 +307,15 @@ export function attachLegacyApiSurface(
     });
   }
 
+  /* ═══════════════════════════════════════════════════════
+     🔗 FLAT LEGACY SURFACE
+     ═══════════════════════════════════════════════════════ */
   const legacySurface: Record<string, Loose> = {
+    /* ─── Account ─── */
     addExternalModule: account.addExternalModule,
     changeAvatar: account.changeAvatar,
     changeBio: account.changeBio,
+    changeBlockedStatus: account.changeBlockedStatus,
     enableAutoSaveAppState: account.enableAutoSaveAppState,
     getCurrentUserID: account.getCurrentUserID,
     handleFriendRequest: account.handleFriendRequest,
@@ -442,13 +323,16 @@ export function attachLegacyApiSurface(
     refreshFb_dtsg: account.refreshFb_dtsg,
     setPostReaction: account.setPostReaction,
     unfriend: account.unfriend,
+
+    /* ─── HTTP ─── */
     httpGet: http.get,
     httpPost: http.post,
     postFormData: http.postFormData,
+
+    /* ─── Threads ─── */
     addUserToGroup: threads.addUsers,
     changeAdminStatus: threads.setAdmin,
     changeArchivedStatus: threads.archive,
-    changeBlockedStatus: account.changeBlockedStatus,
     changeGroupImage: threads.setImage,
     changeNickname: threads.setNickname,
     changeThreadColor: threads.setColor,
@@ -456,42 +340,51 @@ export function attachLegacyApiSurface(
     createNewGroup: threads.createGroup,
     createPoll: threads.createPoll,
     createThemeAI: threads.createThemeAI,
-    deleteMessage: messages.delete,
     deleteThread: threads.delete,
-    editMessage: messages.edit,
-    forwardAttachment: messages.forwardAttachment,
-    getEmojiUrl: messages.getEmojiUrl,
-    getFriendsList: users.getFriends,
-    getMessage: messages.get,
-    getThemePictures: threads.getThemePictures,
-    handleMessageRequest: threads.handleMessageRequest,
-    markAsDelivered: messages.markDelivered,
-    markAsRead: messages.markRead,
-    markAsReadAll: messages.markReadAll,
-    markAsSeen: messages.markSeen,
-    muteThread: threads.mute,
-    removeUserFromGroup: threads.removeUser,
-    resolvePhotoUrl: messages.resolvePhotoUrl,
-    scheduler: ctx._scheduler,
-    searchForThread: threads.search,
-    sendMessage: messages.send,
-    sendTypingIndicator: messages.typing,
-    setMessageReaction: messages.react,
-    setTitle: threads.setTitle,
-    shareContact: messages.shareContact,
-    threadColors: threads.getColors ? threads.getColors() : undefined,
-    unsendMessage: messages.unsend,
-    uploadAttachment: messages.uploadAttachment,
-    listenMqtt,
     getThreadHistory: threads.getHistory,
     getThreadInfo: threads.getInfo,
     getThreadList: threads.getList,
     getThreadPictures: threads.getPictures,
+    getThemePictures: threads.getThemePictures,
+    handleMessageRequest: threads.handleMessageRequest,
+    muteThread: threads.mute,
+    removeUserFromGroup: threads.removeUser,
+    searchForThread: threads.search,
+    setTitle: threads.setTitle,
+    threadColors: threads.getColors ? threads.getColors() : undefined,
+
+    /* ─── Messages ─── */
+    deleteMessage: messages.delete,
+    editMessage: messages.edit,
+    forwardAttachment: messages.forwardAttachment,
+    getEmojiUrl: messages.getEmojiUrl,
+    getMessage: messages.get,
+    markAsDelivered: messages.markDelivered,
+    markAsRead: messages.markRead,
+    markAsReadAll: messages.markReadAll,
+    markAsSeen: messages.markSeen,
+    resolvePhotoUrl: messages.resolvePhotoUrl,
+    sendMessage: messages.send,
+    sendTypingIndicator: messages.typing,
+    setMessageReaction: messages.react,
+    shareContact: messages.shareContact,
+    unsendMessage: messages.unsend,
+    uploadAttachment: messages.uploadAttachment,
+
+    /* ─── Users ─── */
+    getFriendsList: users.getFriends,
     getUserID: users.getID,
     getUserInfo: users.getInfo,
-    getUserInfoV2: users.getInfoV2
+    getUserInfoV2: users.getInfoV2,
+
+    /* ─── Realtime & Scheduler ─── */
+    listenMqtt,
+    scheduler: ctx._scheduler
   };
 
+  /* ═══════════════════════════════════════════════════════
+     🗂️ NAMESPACED DOMAINS
+     ═══════════════════════════════════════════════════════ */
   const namespaces: FcaClientNamespaces = {
     messages: compactNamespace({
       send: messages.send,
@@ -511,6 +404,7 @@ export function attachLegacyApiSurface(
       uploadAttachment: messages.uploadAttachment,
       forwardAttachment: messages.forwardAttachment
     }),
+
     threads: compactNamespace({
       createGroup: threads.createGroup,
       getInfo: threads.getInfo,
@@ -535,12 +429,14 @@ export function attachLegacyApiSurface(
       setTitle: threads.setTitle,
       search: threads.search
     }),
+
     users: compactNamespace({
       getID: users.getID,
       getInfo: users.getInfo,
       getInfoV2: users.getInfoV2,
       getFriends: users.getFriends
     }),
+
     account: compactNamespace({
       addExternalModule: account.addExternalModule,
       changeAvatar: account.changeAvatar,
@@ -557,6 +453,7 @@ export function attachLegacyApiSurface(
       getAppState: api.getAppState,
       getCookies: api.getCookies
     }),
+
     realtime: compactNamespace({
       listen: listenMqtt,
       stop: bindLiveMethod(api, "stopListening"),
@@ -567,14 +464,21 @@ export function attachLegacyApiSurface(
       listMiddleware: bindLiveMethod(api, "listMiddleware"),
       setMiddlewareEnabled: bindLiveMethod(api, "setMiddlewareEnabled")
     }),
+
     http: compactNamespace({
       get: http.get,
       post: http.post,
       postFormData: http.postFormData
     }),
-    scheduler: compactNamespace((ctx._scheduler || {}) as Record<string, Loose>)
+
+    scheduler: compactNamespace(
+      (ctx._scheduler || {}) as Record<string, Loose>
+    )
   };
 
+  /* ═══════════════════════════════════════════════════════
+     📥 ATTACH — Skip duplicates, count loaded/skipped
+     ═══════════════════════════════════════════════════════ */
   let loaded = 0;
   let skipped = 0;
 
@@ -583,10 +487,12 @@ export function attachLegacyApiSurface(
       skipped += 1;
       continue;
     }
+
     if (typeof api[key] !== "undefined") {
       skipped += 1;
       continue;
     }
+
     api[key] = value;
     loaded += 1;
   }
@@ -594,4 +500,17 @@ export function attachLegacyApiSurface(
   return { loaded, skipped, namespaces };
 }
 
+/* ═══════════════════════════════════════════════════════════
+   📌 DEFAULT EXPORT
+   ═══════════════════════════════════════════════════════════ */
+
 export default attachLegacyApiSurface;
+
+/* ═══════════════════════════════════════════════════════════
+   📖 CREDITS
+   ─────────────────────────────────────────────
+   🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+   🧬 Original Author : DongDev (Donix)
+   📦 Original Project: @dongdev/fca-unofficial
+   📜 License         : Apache-2.0
+   ═══════════════════════════════════════════════════════════ */
