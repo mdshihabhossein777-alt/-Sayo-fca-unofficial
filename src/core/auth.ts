@@ -1,3 +1,23 @@
+/**
+ * Shihab X FCA — Main Authentication Entry
+ * Forked from @dongdev/fca-unofficial
+ *
+ * ─────────────────────────────────────────────
+ * 🧬 Original Author : DongDev (Donix)
+ * 🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+ * 📜 License         : Apache-2.0
+ * ─────────────────────────────────────────────
+ *
+ * Public authentication surface:
+ *   • login()            — classic FCA + Promise (dual-mode)
+ *   • loginAsync()       — Promise-only, returns FcaContext
+ *   • loginLegacy()      — callback receives FcaContext
+ *   • loginViaAPI()      — token-based login via external API
+ *   • tokensViaAPI()     — fetch tokens from external API
+ *   • normalizeCookieHeaderString()
+ *   • setJarFromPairs()
+ */
+
 import logger from "../func/logger";
 import format from "../utils/format";
 import { createDefaultContext, type FcaContext, type FcaOptions } from "./state";
@@ -9,6 +29,10 @@ import loginHelper from "./login-helper";
 
 const { getType } = format;
 
+/* ═══════════════════════════════════════════════════════════
+   🎯 PUBLIC TYPES
+   ═══════════════════════════════════════════════════════════ */
+
 export interface LoginCredentials {
   appState?: Loose[];
   email?: string;
@@ -16,14 +40,34 @@ export interface LoginCredentials {
   Cookie?: string | string[] | Record<string, string>;
 }
 
+export interface TokensApiResponse {
+  status?: boolean;
+  ok?: boolean;
+  uid?: string;
+  access_token?: string;
+  cookies?: Loose[] | string;
+  cookie?: Loose[] | string;
+  message?: string;
+}
+
+/** Classic FCA-style callback receives the flat `api` object (same as `ctx.api`). */
+export type LoginApiCallback = (err: Error | null | undefined, api?: Loose) => void;
+
+/* ═══════════════════════════════════════════════════════════
+   🌐 GLOBAL SETUP — Shihab X Config + Error Handlers
+   ═══════════════════════════════════════════════════════════ */
+
 const g: Loose = global as Loose;
 const initialConfig = loadConfig().config;
+
 g.fca = g.fca || {};
 g.fca.config = initialConfig;
 
+/* ─── Install global error handlers (only once) ─── */
 if (!g.fca._errorHandlersInstalled) {
   g.fca._errorHandlersInstalled = true;
 
+  /* Unhandled promise rejections */
   process.on("unhandledRejection", (reason: Loose) => {
     try {
       if (reason && typeof reason === "object") {
@@ -40,7 +84,7 @@ if (!g.fca._errorHandlersInstalled) {
           errorMessage.includes("Connect Timeout") ||
           errorMessage.includes("fetch failed")
         ) {
-          logger(`Network timeout error caught (non-fatal): ${errorMessage}`, "warn");
+          logger(`[Shihab X FCA] Network timeout (non-fatal): ${errorMessage}`, "warn");
           return;
         }
 
@@ -51,17 +95,23 @@ if (!g.fca._errorHandlersInstalled) {
           errorMessage.includes("ECONNREFUSED") ||
           errorMessage.includes("ENOTFOUND")
         ) {
-          logger(`Network connection error caught (non-fatal): ${errorMessage}`, "warn");
+          logger(`[Shihab X FCA] Network connection error (non-fatal): ${errorMessage}`, "warn");
           return;
         }
       }
+
       logger(
-        `Unhandled promise rejection (non-fatal): ${reason && reason.message ? reason.message : String(reason)}`,
+        `[Shihab X FCA] Unhandled promise rejection (non-fatal): ${
+          reason && reason.message ? reason.message : String(reason)
+        }`,
         "error"
       );
-    } catch { }
+    } catch {
+      /* silent */
+    }
   });
 
+  /* Uncaught exceptions */
   process.on("uncaughtException", (error: Loose) => {
     try {
       const errorMessage = error.message || String(error);
@@ -77,17 +127,27 @@ if (!g.fca._errorHandlersInstalled) {
         errorMessage.includes("Connect Timeout") ||
         errorMessage.includes("fetch failed")
       ) {
-        logger(`Uncaught network timeout error (non-fatal): ${errorMessage}`, "warn");
+        logger(`[Shihab X FCA] Uncaught network timeout (non-fatal): ${errorMessage}`, "warn");
         return;
       }
 
-      logger(`Uncaught exception (attempting to continue): ${errorMessage}`, "error");
-    } catch { }
+      logger(`[Shihab X FCA] Uncaught exception (continuing): ${errorMessage}`, "error");
+    } catch {
+      /* silent */
+    }
   });
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🍪 APPSTATE HELPERS
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Convert an AppState cookie array into a `key=value; key=value` string.
+ */
 function appStateToCookieString(appState: Loose[] | undefined): string {
   if (!Array.isArray(appState)) return "";
+
   return appState
     .map((c) => {
       const key = c?.key || c?.name;
@@ -99,27 +159,38 @@ function appStateToCookieString(appState: Loose[] | undefined): string {
     .join("; ");
 }
 
+/**
+ * Extract the logged-in user's FBID from AppState (`c_user` or `i_user`).
+ */
 function appStateToFbid(appState: Loose[] | undefined): string {
   if (!Array.isArray(appState)) return "";
+
   const cUser = appState.find((c) => c?.key === "c_user" || c?.name === "c_user");
   const iUser = appState.find((c) => c?.key === "i_user" || c?.name === "i_user");
+
   return String((cUser && cUser.value) || (iUser && iUser.value) || "");
 }
 
-const DEFAULT_LOGIN_OPTIONS: Required<Pick<
-  FcaOptions,
-  | "selfListen"
-  | "selfListenEvent"
-  | "listenEvents"
-  | "listenTyping"
-  | "updatePresence"
-  | "forceLogin"
-  | "autoMarkRead"
-  | "autoReconnect"
-  | "online"
-  | "emitReady"
-  | "userAgent"
->> = {
+/* ═══════════════════════════════════════════════════════════
+   🎛️ DEFAULT LOGIN OPTIONS
+   ═══════════════════════════════════════════════════════════ */
+
+const DEFAULT_LOGIN_OPTIONS: Required<
+  Pick<
+    FcaOptions,
+    | "selfListen"
+    | "selfListenEvent"
+    | "listenEvents"
+    | "listenTyping"
+    | "updatePresence"
+    | "forceLogin"
+    | "autoMarkRead"
+    | "autoReconnect"
+    | "online"
+    | "emitReady"
+    | "userAgent"
+  >
+> = {
   selfListen: false,
   selfListenEvent: false,
   listenEvents: false,
@@ -134,8 +205,9 @@ const DEFAULT_LOGIN_OPTIONS: Required<Pick<
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 };
 
-/** Classic FCA-style callback receives the flat `api` object (same as `ctx.api`). */
-export type LoginApiCallback = (err: Error | null | undefined, api?: Loose) => void;
+/* ═══════════════════════════════════════════════════════════
+   🚀 loginAsync — Promise, returns FcaContext
+   ═══════════════════════════════════════════════════════════ */
 
 export async function loginAsync(
   credentials: LoginCredentials,
@@ -144,16 +216,19 @@ export async function loginAsync(
   const { config } = loadConfig();
   g.fca = g.fca || {};
   g.fca.config = config;
+
   const ctx = createDefaultContext();
   const globalOptions: FcaOptions = { ...DEFAULT_LOGIN_OPTIONS };
 
   setOptions(globalOptions, customOptions || {});
+
   ctx.options = { ...ctx.options, ...globalOptions };
   ctx.globalOptions = globalOptions;
   ctx.cookieString = appStateToCookieString(credentials.appState);
   ctx.fbid = appStateToFbid(credentials.appState);
   (ctx as Loose)._request = createRequestHelper(ctx);
 
+  /* ─── Run the login helper ─── */
   const runLogin = () =>
     new Promise<Loose>((resolve, reject) => {
       loginHelper(
@@ -170,12 +245,17 @@ export async function loginAsync(
     });
 
   let api: Loose;
+
+  /* ─── Optional update check ─── */
   if (config.checkUpdate.enabled) {
     await runConfiguredUpdateCheck(config, logger);
   }
+
   api = await runLogin();
 
   (ctx as Loose).api = api;
+
+  /* ─── Enrich context with bot info ─── */
   try {
     if (typeof api.getCurrentUserID === "function") {
       ctx.fbid = String(api.getCurrentUserID() || ctx.fbid || "");
@@ -184,14 +264,21 @@ export async function loginAsync(
     if (typeof api.getCookies === "function") {
       ctx.cookieString = String(api.getCookies() || ctx.cookieString || "");
     }
-  } catch { }
+  } catch {
+    /* ignore enrichment errors */
+  }
 
   return ctx;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   🎯 login — Dual-mode (Promise + classic callback)
+   ═══════════════════════════════════════════════════════════ */
+
 /**
- * Login: Promise API, or legacy `login(credentials, (err, api) => …)` like classic FCA.
- * For `const login = require('@dongdev/fca-unofficial')`, use the published `dist/cjs.cjs` entry.
+ * Login: Promise API, or legacy `login(credentials, (err, api) => …)`
+ * like classic FCA. For `const login = require('@mdshihabhosein777-alt/shihab-x-fca')`,
+ * use the published `dist/cjs.cjs` entry.
  */
 export function login(
   credentials: LoginCredentials,
@@ -211,6 +298,7 @@ export function login(
   optionsOrCallback?: FcaOptions | LoginApiCallback,
   callback?: LoginApiCallback
 ): Promise<FcaContext> | void {
+  /* ─── Callback-only form ─── */
   if (typeof optionsOrCallback === "function") {
     const cb = optionsOrCallback;
     void loginAsync(credentials, {})
@@ -223,6 +311,7 @@ export function login(
     return;
   }
 
+  /* ─── Options + callback form ─── */
   if (typeof callback === "function") {
     const opts = (optionsOrCallback || {}) as FcaOptions;
     void loginAsync(credentials, opts)
@@ -235,43 +324,46 @@ export function login(
     return;
   }
 
+  /* ─── Promise-only form ─── */
   return loginAsync(credentials, (optionsOrCallback || {}) as FcaOptions);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   🎯 loginLegacy — Callback receives FcaContext
+   ═══════════════════════════════════════════════════════════ */
 
 export function loginLegacy(
   credentials: LoginCredentials,
   options?: FcaOptions | ((err: Error | null, ctx?: FcaContext) => void),
   callback?: (err: Error | null, ctx?: FcaContext) => void
 ) {
+  /* ─── Shift arguments if callback passed as 2nd param ─── */
   if (getType(options) === "Function" || getType(options) === "AsyncFunction") {
     callback = options as (err: Error | null, ctx?: FcaContext) => void;
     options = {};
   }
 
   const p = loginAsync(credentials, (options || {}) as FcaOptions);
+
   if (typeof callback === "function") {
     p.then((res) => callback?.(null, res)).catch((err) => callback?.(err));
     return;
   }
+
   return p;
 }
 
-export interface TokensApiResponse {
-  status?: boolean;
-  ok?: boolean;
-  uid?: string;
-  access_token?: string;
-  cookies?: Loose[] | string;
-  cookie?: Loose[] | string;
-  message?: string;
-}
+/* ═══════════════════════════════════════════════════════════
+   🎫 TOKEN-BASED LOGIN (via external API)
+   ═══════════════════════════════════════════════════════════ */
 
 export const tokensViaAPI = (
   email: string,
   password: string,
   twoFactor?: string | null,
   apiBaseUrl?: string | null
-): Promise<TokensApiResponse> => loginHelper.tokensViaAPI(email, password, twoFactor, apiBaseUrl);
+): Promise<TokensApiResponse> =>
+  loginHelper.tokensViaAPI(email, password, twoFactor, apiBaseUrl);
 
 export const loginViaAPI = (
   email: string,
@@ -279,7 +371,12 @@ export const loginViaAPI = (
   twoFactor?: string | null,
   apiBaseUrl?: string | null,
   apiKey?: string | null
-): Promise<TokensApiResponse> => loginHelper.loginViaAPI(email, password, twoFactor, apiBaseUrl, apiKey);
+): Promise<TokensApiResponse> =>
+  loginHelper.loginViaAPI(email, password, twoFactor, apiBaseUrl, apiKey);
+
+/* ═══════════════════════════════════════════════════════════
+   🍪 COOKIE UTILITIES
+   ═══════════════════════════════════════════════════════════ */
 
 export const normalizeCookieHeaderString = (cookieHeader: string) =>
   loginHelper.normalizeCookieHeaderString(cookieHeader);
@@ -293,7 +390,17 @@ export const setJarFromPairs = (
   domain: string
 ) => loginHelper.setJarFromPairs(jar, pairs, domain);
 
+/* ═══════════════════════════════════════════════════════════
+   📌 DEFAULT EXPORT
+   ═══════════════════════════════════════════════════════════ */
+
 export default login;
 
-
-
+/* ═══════════════════════════════════════════════════════════
+   📖 CREDITS
+   ─────────────────────────────────────────────
+   🎨 Fork Maintainer : Shihab X (mdshihabhosein777-alt)
+   🧬 Original Author : DongDev (Donix)
+   📦 Original Project: @dongdev/fca-unofficial
+   📜 License         : Apache-2.0
+   ═══════════════════════════════════════════════════════════ */
