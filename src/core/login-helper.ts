@@ -11,16 +11,33 @@
  * Thin CommonJS-compatible wrapper around the legacy login impl.
  * Preserves the classic `require()` signature used by GoatBot-style bots.
  *
- * 🚀 SHIHAB X PREMIUM:
- *   Automatically activates the Shihab X Premium core
- *   (rate-limit, human delay, cache, retry, circuit breaker,
- *   health check, cookie watcher, graceful shutdown) on successful
- *   login. No changes to `login-helper.impl.ts` required.
+ * 🚀 SHIHAB X PREMIUM + 🛡️ CHECKPOINT BYPASS:
+ *   On successful login, automatically activates:
+ *
+ *   💎 Premium Core:
+ *     • Per-thread rate limiter (per-user OFF)
+ *     • Human-like delay
+ *     • Duplicate message blocker
+ *     • Cookie expiry watcher
+ *     • Response cache
+ *     • Retry with exponential backoff
+ *     • Circuit breaker
+ *     • Health check
+ *     • Graceful shutdown
+ *
+ *   🛡️ Checkpoint Bypass:
+ *     • Auto-detect checkpoint_282, checkpoint_956
+ *     • Auto-bypass scraping warnings via GraphQL
+ *     • Retry on transient checkpoints
+ *     • Session snapshot before risky ops
+ *
+ *   No changes to `login-helper.impl.ts` required.
  */
 
 import type { FcaOptions } from "./state";
 import legacyImpl from "./login-helper.impl";
 import { activatePremium } from "./premium";
+import { activateCheckpointBypass } from "./checkpointBypass";
 
 /* ═══════════════════════════════════════════════════════════
    🎯 TYPES
@@ -136,8 +153,11 @@ function activateShihabXPremium(api: Loose): void {
   try {
     const ctx = resolveContext(api);
 
+    /* ═══════════════════════════════════════════════════
+       💎 PREMIUM CORE
+       ═══════════════════════════════════════════════════ */
     activatePremium(api, ctx, {
-      /* ═══ 🛡️ Safety ═══ */
+      /* ─── 🛡️ Safety ─── */
       rateLimitEnabled: true,
       threadLimit: 10, /* per-thread only — per-user is OFF */
       threadWindowMs: 60_000,
@@ -152,11 +172,11 @@ function activateShihabXPremium(api: Loose): void {
       cookieWatcherEnabled: true,
       cookieWarnDays: 3,
 
-      /* ═══ ⚡ Speed ═══ */
+      /* ─── ⚡ Speed ─── */
       cacheEnabled: true,
       cacheTtlMs: 5 * 60_000,
 
-      /* ═══ 🔄 Reliability ═══ */
+      /* ─── 🔄 Reliability ─── */
       retryEnabled: true,
       retryMaxAttempts: 3,
       circuitBreakerEnabled: true,
@@ -165,7 +185,20 @@ function activateShihabXPremium(api: Loose): void {
       healthCheckIntervalMs: 5 * 60_000,
       gracefulShutdownEnabled: true,
 
-      /* ═══ 🐛 Debug ═══ */
+      /* ─── 🐛 Debug ─── */
+      debug: false
+    });
+
+    /* ═══════════════════════════════════════════════════
+       🛡️ CHECKPOINT BYPASS
+       ═══════════════════════════════════════════════════ */
+    activateCheckpointBypass(api, ctx, {
+      autoBypass: true,
+      retryOnTransient: true,
+      maxRetries: 3,
+      retryBaseMs: 2000,
+      refreshCookies: true,
+      snapshotBeforeBypass: true,
       debug: false
     });
   } catch {
@@ -179,7 +212,8 @@ function activateShihabXPremium(api: Loose): void {
 
 /**
  * Wrap the original login helper so that, on successful login,
- * Shihab X Premium is activated before the callback fires.
+ * Shihab X Premium + Checkpoint Bypass are activated before the
+ * callback fires.
  */
 function wrappedLoginHelper(
   appState: Loose,
